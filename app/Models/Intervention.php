@@ -11,7 +11,7 @@ class Intervention extends Model
     /** @use HasFactory<\Database\Factories\InterventionsFactory> */
     use HasFactory;
 
-    protected $connection = 'mysql';
+    // protected $connection = 'mysql';
     protected $table = 'interventions';
     public $timestamps = true;
     protected $dates = ['deleted_at','appointment'];

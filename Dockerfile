@@ -6,13 +6,15 @@ FROM php:8.4-fpm-alpine
 # ── System packages ───────────────────────────────────────────────────────────
 RUN apk add --no-cache \
         bash curl nginx supervisor \
-        libpng-dev libxml2-dev libzip-dev \
+        libpng-dev libjpeg-turbo-dev libwebp-dev freetype-dev \
+        libxml2-dev libzip-dev \
         icu-dev oniguruma-dev \
         linux-headers \
         zip unzip mysql-client
 
 # ── PHP extensions ────────────────────────────────────────────────────────────
-RUN docker-php-ext-install \
+RUN docker-php-ext-configure gd --with-jpeg --with-webp --with-freetype \
+ && docker-php-ext-install \
         pdo_mysql mbstring exif pcntl bcmath gd zip sockets intl opcache
 
 # ── Opcache ───────────────────────────────────────────────────────────────────
@@ -39,19 +41,19 @@ RUN composer install \
 COPY . .
 
 # ── Autoloader ────────────────────────────────────────────────────────────────
-# --no-scripts prevents package:discover from running at build time
-# (it needs a real env + DB, so we run it in the entrypoint instead)
+# --no-scripts: package:discover needs a real env, so it runs in the entrypoint.
 RUN composer dump-autoload --optimize --no-dev --no-scripts
 
 # ── Permissions ───────────────────────────────────────────────────────────────
-RUN chown -R www-data:www-data /var/www \
- && chmod -R 775 storage bootstrap/cache \
- && mkdir -p storage/logs \
-              storage/framework/cache \
-              storage/framework/sessions \
-              storage/framework/views
+RUN mkdir -p storage/logs \
+             storage/framework/cache \
+             storage/framework/sessions \
+             storage/framework/views \
+ && chown -R www-data:www-data /var/www \
+ && chmod -R 775 storage bootstrap/cache
 
 # ── Nginx config ──────────────────────────────────────────────────────────────
+# CORS is handled by Laravel (config/cors.php) — not here, to avoid duplicate headers.
 RUN printf '%s\n' \
     'user nginx;' \
     'worker_processes auto;' \
@@ -68,18 +70,6 @@ RUN printf '%s\n' \
     '        server_name _;' \
     '        root /var/www/public;' \
     '        index index.php;' \
-    '        set $cors_origin "";' \
-    '        if ($http_origin ~* "^http://(localhost|127\.0\.0\.1)(:[0-9]+)?$") {' \
-    '            set $cors_origin $http_origin;' \
-    '        }' \
-    '        add_header Access-Control-Allow-Origin  $cors_origin always;' \
-    '        add_header Access-Control-Allow-Methods "GET,POST,PUT,PATCH,DELETE,OPTIONS" always;' \
-    '        add_header Access-Control-Allow-Headers "Authorization,Content-Type,Accept,X-Requested-With,X-Socket-Id" always;' \
-    '        add_header Access-Control-Allow-Credentials "true" always;' \
-    '        add_header Access-Control-Max-Age 86400 always;' \
-    '        if ($request_method = OPTIONS) {' \
-    '            return 204;' \
-    '        }' \
     '        location = /favicon.ico { log_not_found off; access_log off; }' \
     '        location / { try_files $uri $uri/ /index.php?$query_string; }' \
     '        location ~ \.php$ {' \
@@ -94,8 +84,7 @@ RUN printf '%s\n' \
     '}' > /etc/nginx/nginx.conf
 
 # ── Supervisord config ────────────────────────────────────────────────────────
-# Only manages php-fpm + nginx.
-# reverb and queue are separate containers with their own entrypoint overrides.
+# Only php-fpm + nginx. reverb and queue run as separate containers.
 RUN mkdir -p /etc/supervisor/conf.d && printf '%s\n' \
     '[supervisord]' \
     'nodaemon=true' \
@@ -123,37 +112,45 @@ RUN mkdir -p /etc/supervisor/conf.d && printf '%s\n' \
     > /etc/supervisor/conf.d/supervisord.conf
 
 # ── Entrypoint script ─────────────────────────────────────────────────────────
+# RUN_MIGRATIONS=true on exactly ONE container (avoids migration races).
 RUN printf '%s\n' \
     '#!/bin/bash' \
     'set -e' \
     'cd /var/www' \
     '' \
-    '# Wait for MySQL' \
-    'if [ -n "$DB_HOST" ]; then' \
+    'if [ -z "$APP_KEY" ]; then' \
+    '  echo "ERROR: APP_KEY is required (php artisan key:generate --show)" >&2' \
+    '  exit 1' \
+    'fi' \
+    '' \
+    'if [ -n "$DB_HOST" ] && [ "${DB_CONNECTION:-mysql}" = "mysql" ]; then' \
     '  echo "Waiting for MySQL at $DB_HOST:${DB_PORT:-3306}..."' \
-    '  until mysqladmin ping -h"$DB_HOST" -P"${DB_PORT:-3306}" -u"$DB_USERNAME" -p"$DB_PASSWORD" --silent 2>/dev/null; do' \
+    '  until (echo > /dev/tcp/"$DB_HOST"/"${DB_PORT:-3306}") 2>/dev/null; do' \
     '    sleep 2' \
     '  done' \
     '  echo "MySQL is ready."' \
     'fi' \
     '' \
-    '# Generate app key if missing' \
-    'if [ -z "$APP_KEY" ]; then' \
-    '  php artisan key:generate --force' \
-    'fi' \
-    '' \
-    '# Run package discovery at runtime (needs real env + packages)' \
     'php artisan package:discover --ansi || true' \
     '' \
-    '# Run migrations' \
-    'php artisan migrate --force' \
+    'if [ "${RUN_MIGRATIONS:-false}" = "true" ]; then' \
+    '  php artisan migrate --force' \
+    'fi' \
     '' \
-    '# Cache for performance' \
     'php artisan config:cache' \
     'php artisan route:cache' \
     'php artisan view:cache' \
     '' \
-    '# Start supervisord (php-fpm + nginx)' \
-    'exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf'
+    '# artisan ran as root — hand writable dirs back to php-fpm user' \
+    'chown -R www-data:www-data /var/www/storage /var/www/bootstrap/cache' \
+    '' \
+    'exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf' \
+    > /usr/local/bin/docker-entrypoint.sh \
+ && chmod +x /usr/local/bin/docker-entrypoint.sh
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl -fs http://127.0.0.1:8000/up || exit 1
 
 EXPOSE 8000
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

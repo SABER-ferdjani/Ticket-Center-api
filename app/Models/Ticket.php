@@ -12,7 +12,7 @@ class Ticket extends Model
 {
     /** @use HasFactory<\Database\Factories\TicketFactory> */
     use HasFactory , SoftDeletes;
-    protected $connection = 'mysql';
+    // protected $connection = 'mysql';
     protected $table = 'tickets';
     public $timestamps = true;
     protected $dates = ['deleted_at' ,'completed_at'];

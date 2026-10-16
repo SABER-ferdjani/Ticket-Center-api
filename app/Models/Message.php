@@ -9,7 +9,7 @@ class Message extends Model
 {
     use HasFactory;
 
-    protected $connection = 'mysql';
+    // protected $connection = 'mysql';
     protected $table      = 'messages';
     public    $timestamps = true;
 

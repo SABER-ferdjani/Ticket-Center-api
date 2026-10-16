@@ -10,7 +10,7 @@ class Assignment extends Model
     /** @use HasFactory<\Database\Factories\AssignmentFactory> */
     use HasFactory;
 
-    protected $connection = 'mysql';
+    // protected $connection = 'mysql';
     protected $table = 'assignments';
     public $timestamps = true;
     protected $dates = ['deleted_at'];
